@@ -1,0 +1,25 @@
+{
+  "source_name": "EU-Startups_Directory",
+  "start_urls": [
+    "https://www.eu-startups.com/directory/wpbdp_category/german-startups/",
+    "https://www.eu-startups.com/directory/wpbdp_category/austrian-startups/",
+    "https://www.eu-startups.com/directory/wpbdp_category/swiss-startups/"
+  ],
+  "listing_page_selectors": {
+    "company_link": ".wpbdp-listing .listing-title a",
+    "pagination_next": ".wpbdp-pagination .next"
+  },
+  "detail_page_extractors": {
+    "company_name": { "selector": ".wpbdp-listing-title", "type": "text" },
+    "website": { "selector": ".wpbdp-field-website .value a", "type": "href" },
+    "founded": { "selector": ".wpbdp-field-founded-year .value", "type": "text" },
+    "tags": { "selector": ".wpbdp-field-tags .value", "type": "text" },
+    "based_in": { "selector": ".wpbdp-field-based-in .value", "type": "text" },
+    "business_description": { "selector": ".wpbdp-field-business-description .value", "type": "text" },
+    "long_business_description": { "selector": ".wpbdp-field-long-business-description .value", "type": "text" },
+    "category": { "selector": ".wpbdp-field-category .value", "type": "text" },
+    "total_funding": { "selector": ".wpbdp-field-total-funding .value", "type": "text" },
+    "company_status": { "selector": ".wpbdp-field-company-status .value", "type": "text" }
+  },
+  "max_pages_to_crawl_per_start_url": 50
+}
