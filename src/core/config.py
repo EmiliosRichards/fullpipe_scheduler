@@ -272,6 +272,7 @@ class AppConfig:
         self.proxy_rotation_strategy: str = os.getenv('PROXY_ROTATION_STRATEGY', 'random') # 'random', 'sequential', 'rotate_on_failure'
         self.proxy_health_check_enabled: bool = os.getenv('PROXY_HEALTH_CHECK_ENABLED', 'True').lower() == 'true'
         self.proxy_cooldown_seconds: int = int(os.getenv('PROXY_COOLDOWN_SECONDS', '300'))
+        self.proxy_server: Optional[str] = os.getenv('PROXY_SERVER')
 
         # --- Interaction Handling ---
         self.interaction_handler_enabled: bool = os.getenv('INTERACTION_HANDLER_ENABLED', 'True').lower() == 'true'

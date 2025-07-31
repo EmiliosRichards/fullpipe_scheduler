@@ -1,7 +1,7 @@
 {
-  "source_name": "EU-Startups_Directory",
+  "source_name": "DE-Startups_Directory",
   "start_urls": [
-    "https://www.eu-startups.com/directory/"
+    "https://www.eu-startups.com/directory/wpbdp_category/german-startups/"
   ],
   "listing_page_selectors": {
     "company_link": ".wpbdp-listing .listing-title a",

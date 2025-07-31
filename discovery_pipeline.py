@@ -57,36 +57,64 @@ def run_discovery_pipeline(profile: Dict[str, Any], app_config: AppConfig, outpu
     listing_selectors = profile.get("listing_page_selectors", {})
     detail_extractors = profile.get("detail_page_extractors", {})
     max_pages = profile.get("max_pages_to_crawl_per_start_url", 1)
+    request_delay = profile.get("request_delay_seconds", 5) # Default to 5 seconds
 
     if not all([start_urls, listing_selectors, detail_extractors]):
         logger.error("Profile is missing one or more required keys: 'start_urls', 'listing_page_selectors', 'detail_page_extractors'.")
         return
 
-    all_discovered_companies_data = []
     processed_detail_pages = set()
+    discovered_companies_count = 0
+
+    # Prepare output file
+    excel_path = os.path.join(output_dir, f"discovered_data_{profile.get('source_name')}.xlsx")
+    header = list(detail_extractors.keys())
+    # Create an empty file with header to start
+    pd.DataFrame(columns=header).to_excel(excel_path, index=False, engine='openpyxl')
 
     async def discovery_main():
+        nonlocal discovered_companies_count
         # Create a subdirectory for saving HTML content for debugging
         html_debug_dir = os.path.join(output_dir, "html_debug")
         os.makedirs(html_debug_dir, exist_ok=True)
         
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            launch_options = {"headless": True}
+            if app_config.proxy_server:
+                launch_options["proxy"] = {
+                    "server": app_config.proxy_server
+                }
+                logger.info(f"Using proxy server: {app_config.proxy_server}")
+            browser = await p.chromium.launch(**launch_options)
             page = await browser.new_page()
 
             for start_url in start_urls:
-                if limit > 0 and len(all_discovered_companies_data) >= limit: break
+                if limit > 0 and discovered_companies_count >= limit: break
                 
                 logger.info(f"Processing start URL: {start_url}")
                 current_url: Optional[str] = start_url
                 pages_crawled = 0
+                
+                # Check for progress file and resume if it exists
+                progress_file = os.path.join(output_dir, f"progress_{sanitize_filename_component(start_url)}.txt")
+                if os.path.exists(progress_file):
+                    with open(progress_file, 'r') as f:
+                        resume_url = f.read().strip()
+                        if resume_url:
+                            logger.info(f"Resuming from saved progress: {resume_url}")
+                            current_url = resume_url
 
-                while current_url and pages_crawled < max_pages:
-                    if limit > 0 and len(all_discovered_companies_data) >= limit: break
+                while current_url:
+                    # If max_pages is set (non-zero), stop if the limit is reached.
+                    if max_pages > 0 and pages_crawled >= max_pages:
+                        logger.info(f"Reached max_pages limit of {max_pages}. Stopping pagination for this start URL.")
+                        break
+                    if limit > 0 and discovered_companies_count >= limit: break
                     
                     try:
                         await page.goto(current_url, timeout=60000, wait_until='networkidle')
                         logger.info(f"Successfully navigated to listing page: {current_url}")
+                        await asyncio.sleep(request_delay) # Add delay
                         
                         # Save listing page HTML for debugging selectors
                         listing_html_content = await page.content()
@@ -103,7 +131,7 @@ def run_discovery_pipeline(profile: Dict[str, Any], app_config: AppConfig, outpu
                         detail_page_urls = [await link.get_attribute('href') for link in company_links_on_page]
                         
                         for detail_url in detail_page_urls:
-                            if limit > 0 and len(all_discovered_companies_data) >= limit:
+                            if limit > 0 and discovered_companies_count >= limit:
                                 logger.info(f"Discovery limit of {limit} reached. Stopping.")
                                 break
 
@@ -120,6 +148,7 @@ def run_discovery_pipeline(profile: Dict[str, Any], app_config: AppConfig, outpu
                             try:
                                 logger.info(f"Navigating to detail page: {normalized_detail_url}")
                                 await detail_page.goto(normalized_detail_url, timeout=60000, wait_until='networkidle')
+                                await asyncio.sleep(request_delay) # Add delay
                                 
                                 # Save HTML for debugging
                                 html_content = await detail_page.content()
@@ -147,7 +176,12 @@ def run_discovery_pipeline(profile: Dict[str, Any], app_config: AppConfig, outpu
                                     company_data[field] = data_point.strip() if data_point else None
                                     logger.debug(f"Extracted field '{field}': {company_data[field]}")
 
-                                all_discovered_companies_data.append(company_data)
+                                # Append data incrementally
+                                df_single = pd.DataFrame([company_data], columns=header)
+                                with pd.ExcelWriter(excel_path, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
+                                    df_single.to_excel(writer, index=False, header=False, startrow=writer.sheets['Sheet1'].max_row)
+
+                                discovered_companies_count += 1
                                 processed_detail_pages.add(normalized_detail_url)
 
                             except PlaywrightTimeoutError:
@@ -157,17 +191,29 @@ def run_discovery_pipeline(profile: Dict[str, Any], app_config: AppConfig, outpu
                             finally:
                                 await detail_page.close()
 
-                        if limit > 0 and len(all_discovered_companies_data) >= limit:
+                        if limit > 0 and discovered_companies_count >= limit:
                             current_url = None
                         else:
                             next_page_element = page.locator(listing_selectors["pagination_next"]).first
                             if await next_page_element.is_visible():
                                 next_page_url = await next_page_element.get_attribute('href')
                                 current_url = urljoin(current_url, next_page_url) if next_page_url else None
-                                logger.info(f"Navigating to next listing page: {current_url}")
+                                if current_url:
+                                    # Save the next page URL as progress
+                                    with open(progress_file, 'w') as f:
+                                        f.write(current_url)
+                                    logger.info(f"Navigating to next listing page: {current_url}")
+                                else:
+                                    logger.info("No next page link found. Ending pagination for this start URL.")
+                                    # Clear progress file on completion
+                                    if os.path.exists(progress_file):
+                                        os.remove(progress_file)
                             else:
                                 logger.info("No next page link found. Ending pagination for this start URL.")
                                 current_url = None
+                                # Clear progress file on completion
+                                if os.path.exists(progress_file):
+                                    os.remove(progress_file)
 
                     except PlaywrightTimeoutError:
                         logger.error(f"Timeout loading listing page: {current_url}")
@@ -181,62 +227,64 @@ def run_discovery_pipeline(profile: Dict[str, Any], app_config: AppConfig, outpu
     # Run the async main function
     asyncio.run(discovery_main())
 
-    # Save the structured data to a CSV file
-    if all_discovered_companies_data:
-        output_csv_path = os.path.join(output_dir, f"discovered_data_{profile.get('source_name')}.csv")
-        try:
-            # The header should be the keys from the detail_page_extractors
-            header = list(detail_extractors.keys())
-            df = pd.DataFrame(all_discovered_companies_data)
-            excel_path = os.path.join(output_dir, f"discovered_data_{profile.get('source_name')}.xlsx")
-            df.to_excel(excel_path, index=False)
-            logger.info(f"Successfully saved {len(all_discovered_companies_data)} companies to {excel_path}")
-        except IOError as e:
-            logger.error(f"Failed to write discovered data to CSV file: {e}")
-
-    logger.info(f"Discovery run finished. Found {len(all_discovered_companies_data)} companies.")
+    logger.info(f"Discovery run finished. Found {discovered_companies_count} companies.")
 
 def main(args):
     """Main entry point for the discovery pipeline."""
     pipeline_start_time = time.time()
     
-    # Initialize AppConfig
+    # Initialize AppConfig and update with CLI args
     app_config = AppConfig()
+    if args.proxy_server:
+        app_config.proxy_server = args.proxy_server
 
-    # Setup Logging
-    log_file_name = f"discovery_run_{args.profile}_{int(pipeline_start_time)}.log"
-    # Note: This assumes a generic output directory structure. This might be refined.
-    output_dir = os.path.join(app_config.output_base_dir, f"discovery_{args.profile}_{int(pipeline_start_time)}")
-    os.makedirs(output_dir, exist_ok=True)
+    # Setup base logging for the overall run
+    overall_log_dir = os.path.join(app_config.output_base_dir, f"discovery_run_{int(pipeline_start_time)}")
+    os.makedirs(overall_log_dir, exist_ok=True)
     
-    log_file_path = os.path.join(output_dir, log_file_name)
+    log_file_path = os.path.join(overall_log_dir, f"main_run_{int(pipeline_start_time)}.log")
     file_log_level_int = getattr(logging, app_config.log_level.upper(), logging.INFO)
     console_log_level_str = "DEBUG" if args.debug else app_config.console_log_level.upper()
     console_log_level_int = getattr(logging, console_log_level_str, logging.WARNING)
     setup_logging(file_log_level=file_log_level_int, console_log_level=console_log_level_int, log_file_path=log_file_path)
-    
-    logger.info(f"Starting Discovery Pipeline for profile: {args.profile}")
 
-    # Load the specified discovery profile
-    discovery_profile = load_discovery_profile(args.profile)
-    if not discovery_profile:
-        logger.error(f"Could not load or find discovery profile: {args.profile}. Exiting.")
-        return
+    logger.info(f"Starting Discovery Pipeline for profiles: {', '.join(args.profiles)}")
 
-    # Run the main pipeline logic
-    run_discovery_pipeline(discovery_profile, app_config, output_dir, args.limit)
+    for profile_name in args.profiles:
+        profile_start_time = time.time()
+        logger.info(f"--- Processing profile: {profile_name} ---")
+
+        # Load the specified discovery profile
+        discovery_profile = load_discovery_profile(profile_name)
+        if not discovery_profile:
+            logger.error(f"Could not load or find discovery profile: {profile_name}. Skipping.")
+            continue
+
+        # Create a dedicated output directory for this profile
+        profile_output_dir = os.path.join(overall_log_dir, f"discovery_{profile_name}_{int(profile_start_time)}")
+        os.makedirs(profile_output_dir, exist_ok=True)
+        
+        # You might want to set up profile-specific logging here if needed,
+        # but for now, we'll use the main logger.
+
+        # Run the main pipeline logic
+        run_discovery_pipeline(discovery_profile, app_config, profile_output_dir, args.limit)
+        
+        profile_duration = time.time() - profile_start_time
+        logger.info(f"--- Finished processing profile '{profile_name}' in {profile_duration:.2f} seconds. ---")
 
     total_duration = time.time() - pipeline_start_time
-    logger.info(f"Discovery Pipeline for profile '{args.profile}' finished in {total_duration:.2f} seconds.")
+    logger.info(f"All discovery profiles processed. Total run time: {total_duration:.2f} seconds.")
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run the Discovery Pipeline to find new company URLs from source websites.")
     parser.add_argument(
-        "-p", "--profile",
+        "-p", "--profiles",
+        nargs='+',
         type=str,
         required=True,
-        help="The name of the discovery profile to run (e.g., 'eu_startups')."
+        help="One or more discovery profile names to run (e.g., 'de_startups' 'at_startups')."
     )
     parser.add_argument(
         "-l", "--limit",
@@ -248,6 +296,12 @@ if __name__ == '__main__':
         "--debug",
         action="store_true",
         help="Enable debug level logging on the console."
+    )
+    parser.add_argument(
+        "--proxy-server",
+        type=str,
+        default=None,
+        help="Proxy server to use for requests (e.g., 'http://user:pass@host:port')."
     )
     args = parser.parse_args()
 
